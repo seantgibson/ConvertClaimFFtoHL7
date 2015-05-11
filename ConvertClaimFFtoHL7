@@ -1,0 +1,318 @@
+/*This Program reads the inbound Claims File in the Covisint Standard Claims File
+ *Format and convert the record into an HL7 ADT^A08 message to so that we can
+ *create the patients before processing the inbound claims.
+ */
+package convertclaimfftohl7;
+import java.io.*;
+import java.net.*;
+//import java.io.OutputStream;
+//import java.io.OutputStreamWriter;
+//import java.nio.file.DirectoryIteratorException;
+//import java.nio.file.DirectoryStream;
+//import java.nio.file.FileSystems;
+//import java.nio.file.Files;
+//import java.nio.file.Path;
+import java.util.logging.Logger;
+import java.util.*;
+import java.util.logging.*;
+import java.net.URL;
+//import sun.misc.*;
+//import javax.net.ssl.HttpsURLConnection;
+//import org.apache.commons.codec.*;
+import javax.xml.bind.DatatypeConverter;
+import org.apache.commons.codec.binary.*;
+import java.io.FileInputStream;
+import java.nio.charset.StandardCharsets;
+ 
+
+
+/**Author:  Sean Thomas Gibson
+ * Date Written: 16-Apr-2015
+ */
+public class ConvertClaimFFtoHL7 {
+
+    /**
+     * @param args the command line arguments
+     * @throws java.io.IOException
+     */
+    public static void main(String[] args) throws IOException {
+        boolean requiresB64Encoding = false;
+        //Define the location of the files we are going to be working with
+        File dir = new File("C:\\Users\\Public\\HL7Files");
+        //start up the program logger
+        Logger logger = Logger.getLogger("ConvertClaimFFtoHL7");
+        FileHandler fh = new FileHandler("C:\\Users\\Public\\Logs\\mylog.txt");
+        
+        // Send logger output to our FileHandler.
+        logger.addHandler(fh);
+        // Request that every detail gets logged.
+        logger.setLevel(Level.ALL);
+        // Log a simple INFO message.
+        logger.info("Starting Up ConvertClaimFFtoHL7 Program");
+
+        BufferedWriter bufferedWriter = null;
+        int i = 0;
+//        String[] PtIDArray = new String[] {"0000000","1111111"};
+        ArrayList<String> PtIDArray = new ArrayList<String>();
+        int ii = 0;
+        
+        //Open the file for reading
+        BufferedReader in = getReader("c:/Users/Public/Documents/BH_CLAIMS.txt");
+        
+        //Encode Password needed for HTTP Mailbox
+        java.util.Base64.Encoder encoder = java.util.Base64.getEncoder();
+        String normalString = "sagibson:sagibson";
+        String userPassword = encoder.encodeToString(normalString.getBytes(StandardCharsets.UTF_8));
+        System.out.println("Encoded User:Password " + userPassword);
+
+        //Open HTTP Connection so we can pass messages to it.
+        String url = "https://messaging.stg.covisint.com:443/invoke/HTTPConnector.Mailbox/post";
+        //String url = "http://requestb.in/1e5664x1";
+        //go look at results here:  http://requestb.in/1e5664x1?inspect"
+        
+        URL obj = new URL(url);
+
+        //Read the HL7 segments from the infile.
+        CLAIMLine claimline = readCLAIM(in);
+        while (claimline != null){
+            //We only want to write 1 HL7 message per patient.  We are going to 
+            //search an array of patient ids and if found, we don't write the 
+            //file.  If it's not found, we add the patient id to the array
+            //and write the file.
+            boolean retval = PtIDArray.contains(claimline.PtID);
+        
+            if(retval){
+                System.out.println("Found PtID in the ArrayList: "+claimline.PtID);
+            }
+            else
+            {
+                PtIDArray.add(claimline.PtID);
+                System.out.println("Just added a record to the array: " + claimline.PtID);
+                //Write a new file for ever line in the claim file.  Use a variable 
+                //that is incremented to create unique filenames.
+                i++;
+                bufferedWriter = new BufferedWriter(new FileWriter("c:/Users/Public/HL7Files/HL7" + i + ".txt"));
+
+                //write the hl7 segment read from the in file to the outfile.
+                bufferedWriter.write(claimline.msgseg);
+                // write a new line
+                bufferedWriter.newLine();
+                // flush
+                bufferedWriter.flush();
+                
+            }//End If
+            //read next
+            bufferedWriter.close();
+            claimline = readCLAIM(in);
+        }//End While
+        
+        //Get ready to do look through the folder where all of the HL7 files live,
+        //we're going to perform an HTTP post on them and rename the files to 
+        //move them to a "Processed" directory.
+        
+        if (dir.isDirectory()) {//make sure it's a directory
+            for (final File f: dir.listFiles()){
+                try {
+                    //set maxretries for handling file moves
+                    int maxRetries = 100;
+                    
+                    //Build up HTTP Connection and Header
+                    HttpURLConnection connection = (HttpURLConnection) obj.openConnection();
+                    connection.setDoOutput(true);
+                    connection.setDoInput(true);
+                    connection.setInstanceFollowRedirects(true);
+                    connection.setRequestMethod("POST");
+                    connection.setRequestProperty("Content-Type", "application/octet-stream");
+                    connection.setRequestProperty("charset", "utf-8");
+                    connection.setRequestProperty("Authorization", "Basic "+userPassword);
+                    connection.setRequestProperty("From-party-id", "BH_MG_BHMG");
+                    connection.setRequestProperty("From-id-qualifier", "");
+                    connection.setRequestProperty("To-party-id", "BAYHLTHCDR");
+                    connection.setRequestProperty("To-id-qualifier", "");
+                    connection.setRequestProperty("Message-type", "ADT_A08");
+                    connection.setRequestProperty("Message-format", "HL7");
+                    connection.setRequestProperty("Standard-version", "2.3");
+                    connection.setRequestProperty("Customer-tracking-no", f.getName());
+        
+                    connection.connect();
+                    
+                    FileInputStream fileInputStream = new FileInputStream(dir+"\\"+f.getName());
+                    DataOutputStream output = new DataOutputStream(connection.getOutputStream());
+                    int maxBufferSize = 1024;
+                    
+                    if (requiresB64Encoding) {
+                        //Base64 Encrypt the data from the file being pushed.
+                        Base64InputStream b64is = new Base64InputStream(fileInputStream, true, -1, null);
+                        int bytesAvailable = b64is.available();
+                        int bufferSize = Math.min(bytesAvailable, maxBufferSize);
+                        byte[] buffer = new byte[bufferSize];
+                        int bytesRead = b64is.read(buffer,0,bufferSize);
+                        while (bytesRead > 0)
+                        {
+                            output.write(buffer,0,bufferSize);
+                            //bytesAvailable = fileInputStream.available();
+                            bytesAvailable = b64is.available();
+                            bufferSize = Math.min(bytesAvailable, maxBufferSize);
+                            //bytesRead = fileInputStream.read(buffer,0,bufferSize);
+                            bytesRead = b64is.read(buffer,0,bufferSize); 
+                        }
+                        output.flush();
+                        output.close();
+
+                    }else {
+                        //send raw data
+                        int bytesAvailable = fileInputStream.available();
+                        int bufferSize = Math.min(bytesAvailable, maxBufferSize);
+                        byte[] buffer = new byte[bufferSize];
+                        int bytesRead = fileInputStream.read(buffer,0,bufferSize);
+                        while (bytesRead > 0)
+                        {
+                            output.write(buffer,0,bufferSize);
+                            bytesAvailable = fileInputStream.available();
+                            bytesRead = fileInputStream.read(buffer,0,bufferSize);
+                        }
+                        fileInputStream.close();
+
+                    }
+                    int code = connection.getResponseCode();
+                    System.out.println("Response (code): " + code);
+                    System.out.println("Response (Message): " + connection.getResponseMessage());
+                    System.out.println("Response Content: " + connection.getContent());
+        
+                    boolean reNamed = false;
+                    
+                    while(reNamed == false){
+                        reNamed = f.renameTo(new File("C:\\Users\\Public\\HL7FilesProcessed\\" +f.getName()));
+                        logger.log(Level.ALL, "File rename " +f.getName() + "retry " + maxRetries);
+                        Thread.sleep(1000);
+                    }
+
+/*                                        
+                    while(maxRetries-- > 0){
+                        if(f.renameTo(new File("C:\\Users\\Public\\HL7FilesProcessed\\" +f.getName())))
+                        {
+                            break;
+                        }
+                        try
+                        {
+                            logger.log(Level.ALL, "File rename " +f.getName() + "retry " + maxRetries);
+                            Thread.sleep(1000);
+                        }
+                        catch (InterruptedException e)
+                        {
+                           e.printStackTrace();
+                           logger.log(Level.ALL, "File rename " + f.getName() + "Exception " + e);
+                        }
+                    }
+*/
+        }catch (Exception e){
+                    //TODO: handle exception
+                    e.printStackTrace();
+                    logger.log(Level.ALL, "File processing " + f.getName() + "Exception " + e);
+                }
+            }
+
+        }
+        
+    }//End Public Static Void        
+    private static BufferedReader getReader(String inname)
+    {
+        BufferedReader in = null;
+        try {
+            File infile = new File(inname);
+            in = new BufferedReader( new FileReader(infile));
+            }
+        catch (FileNotFoundException e)
+        {
+            System.out.println("The file doesn't exist.");
+            System.exit(0);
+        }
+        return in;
+    }
+    private static CLAIMLine readCLAIM(BufferedReader in)
+    {
+        String msgseg;
+        String line = "";
+        String[] data;
+        String EncStrt, EncEnd;
+        String PtID, PtLN, PtFN, PtSex, PtDOB;
+        String PtStreet, PtCity, PtST, PtZip;
+        String CPTCde, CPTMod1, CPTMod2, Dx1, Dx2;
+        String NPI, Provider, ClaimID, ClaimIDSeq, POS, DRG, RevCDE, TPID;
+        
+        try
+        {
+            line = in.readLine();
+        }
+        catch (IOException e)
+        {
+            System.out.println("I/O Error");
+            System.exit(0);
+        }
+        if (line == null)
+            return null;
+        else
+        {
+            data = line.split("\\|");
+            EncStrt = data[0];
+            EncEnd  = data[1];
+            PtID    = data[2];
+            PtFN    = data[3];
+            PtLN    = data[4];
+            PtStreet    = data[5];
+            PtCity      = data[6];
+            PtST        = data[7];
+            PtZip       = data[8];
+            PtSex       = data[9];
+            PtDOB       = data[10].substring(6,10) + data[10].substring(0,2) + data[10].substring(3,5);
+            CPTCde      = data[11];
+            CPTMod1     = data[12];
+            CPTMod2     = data[13];
+            Dx1         = data[14];
+            Dx2         = data[15];
+            NPI         = data[16];
+            Provider    = data[17];
+            ClaimID     = data[18];
+            ClaimIDSeq  = data[19];
+            POS         = data[20];
+            DRG         = data[21];
+            RevCDE      = data[22];
+            TPID        = data[23];
+            
+            msgseg = "MSH|^~\\&|BH_MG_BHMG|GEMMS|BAYHLTHCDR||20150408111816||";
+            msgseg += "ADT^A08|150408111816270187|P|2.3";
+            msgseg += ("\r\n");
+            msgseg += "ENV|A08|20140223141813";
+            msgseg += ("\r\n");
+            msgseg += "PID|1|" + PtID + "|" + PtID + "||"+PtLN+"^"+PtFN+"^||";
+            msgseg += PtDOB+"|"+PtSex+"||Unavailable|"+PtStreet+"^^"+PtCity+"^"+PtST+"^"+PtZip;
+            msgseg += "||||Unavailable|||"+PtID+"||||Unavailable";
+            msgseg += ("\r\n");
+            msgseg += "PV1|1|O";
+            
+            return new CLAIMLine(msgseg, line, PtID);
+        }      
+    }
+
+//    private static void If(boolean b) {
+//        throw new UnsupportedOperationException("Not supported yet."); //To change body of generated methods, choose Tools | Templates.
+//    }
+    
+    private static class CLAIMLine
+    {
+        public String msgseg;
+        public String line;
+        public String PtID;
+        
+        
+        public CLAIMLine(String msgseg, String line, String PtID)
+        {
+            this.msgseg = msgseg;
+            this.line = line;
+            this.PtID = PtID;
+           
+        }
+    }
+    
+    public native int available() throws IOException;
+}
